@@ -6,7 +6,7 @@ import uuid
 from pathlib import Path
 
 from src.llm_client import OpenRouterLLMClient, build_default_llm_client
-from src.schema import SQLiteSchemaIntrospector
+from src.schema import SQLiteSchemaIntrospector, SchemaInfo
 from src.sql_validation import SQLValidator
 from src.observability import get_logger
 from src.types import (
@@ -87,15 +87,29 @@ class AnalyticsPipeline:
         self.llm = llm_client or build_default_llm_client()
         self.executor = SQLiteExecutor(self.db_path)
         self._logger = get_logger(__name__)
-        self._schema = SQLiteSchemaIntrospector(self.db_path, table_name=self.table_name).load()
+        self._schema = None
+
+    def _get_schema(self):
+        if self._schema is not None:
+            return self._schema
+        try:
+            self._schema = SQLiteSchemaIntrospector(self.db_path, table_name=self.table_name).load()
+        except Exception:
+            # Keep the pipeline functional even if schema cannot be loaded yet.
+            # SQL generation quality may be degraded, but validation will still protect execution.
+            self._schema = SchemaInfo(table_name=self.table_name, columns=[], column_types={})
+        return self._schema
 
     def run(self, question: str, request_id: str | None = None) -> PipelineOutput:
         start = time.perf_counter()
         request_id = request_id or uuid.uuid4().hex
         self._logger.info("pipeline_start", extra={"request_id": request_id})
 
+        schema = self._get_schema()
+        schema_context = schema.to_prompt_context()
+
         # Stage 1: SQL Generation
-        sql_gen_output = self.llm.generate_sql(question, self._schema.to_prompt_context())
+        sql_gen_output = self.llm.generate_sql(question, schema_context)
         sql = sql_gen_output.sql
 
         # Stage 2: SQL Validation
@@ -103,8 +117,50 @@ class AnalyticsPipeline:
             sql,
             db_path=self.db_path,
             table_name=self.table_name,
-            allowed_columns=set(self._schema.columns),
+            allowed_columns=set(schema.columns),
         )
+
+        # One retry on invalid SQL for recoverable issues.
+        if not validation_output.is_valid and sql_gen_output.sql:
+            retry_context = dict(schema_context)
+            retry_context["previous_sql"] = sql_gen_output.sql
+            retry_context["previous_error"] = validation_output.error
+            retry_output = self.llm.generate_sql(question, retry_context)
+            # Stitch intermediate outputs + stats
+            sql_gen_output.intermediate_outputs.append(
+                {
+                    "attempt": 1,
+                    "sql": sql_gen_output.sql,
+                    "error": sql_gen_output.error,
+                    "llm_stats": sql_gen_output.llm_stats,
+                }
+            )
+            sql_gen_output.intermediate_outputs.append(
+                {
+                    "attempt": 2,
+                    "sql": retry_output.sql,
+                    "error": retry_output.error,
+                    "llm_stats": retry_output.llm_stats,
+                }
+            )
+            sql_gen_output.sql = retry_output.sql
+            sql_gen_output.error = retry_output.error
+            sql_gen_output.timing_ms += retry_output.timing_ms
+            sql_gen_output.llm_stats = {
+                "llm_calls": int(sql_gen_output.llm_stats.get("llm_calls", 0)) + int(retry_output.llm_stats.get("llm_calls", 0)),
+                "prompt_tokens": int(sql_gen_output.llm_stats.get("prompt_tokens", 0)) + int(retry_output.llm_stats.get("prompt_tokens", 0)),
+                "completion_tokens": int(sql_gen_output.llm_stats.get("completion_tokens", 0)) + int(retry_output.llm_stats.get("completion_tokens", 0)),
+                "total_tokens": int(sql_gen_output.llm_stats.get("total_tokens", 0)) + int(retry_output.llm_stats.get("total_tokens", 0)),
+                "model": retry_output.llm_stats.get("model", sql_gen_output.llm_stats.get("model", "unknown")),
+            }
+            sql = sql_gen_output.sql
+            validation_output = SQLValidator.validate(
+                sql,
+                db_path=self.db_path,
+                table_name=self.table_name,
+                allowed_columns=set(schema.columns),
+            )
+
         if not validation_output.is_valid:
             sql = None
         else:
@@ -115,7 +171,11 @@ class AnalyticsPipeline:
         rows = execution_output.rows
 
         # Stage 4: Answer Generation
-        answer_output = self.llm.generate_answer(question, sql, rows)
+        if execution_output.error:
+            answer_output = self.llm.generate_answer(question, None, [])
+            answer_output.answer = f"SQL execution error: {execution_output.error}"
+        else:
+            answer_output = self.llm.generate_answer(question, sql, rows)
 
         # Determine status
         status = "success"
@@ -145,6 +205,18 @@ class AnalyticsPipeline:
             "total_tokens": sql_gen_output.llm_stats.get("total_tokens", 0) + answer_output.llm_stats.get("total_tokens", 0),
             "model": sql_gen_output.llm_stats.get("model", "unknown"),
         }
+
+        self._logger.info(
+            "pipeline_end",
+            extra={
+                "request_id": request_id,
+                "status": status,
+                "row_count": execution_output.row_count,
+                "llm_calls": total_llm_stats.get("llm_calls"),
+                "total_tokens": total_llm_stats.get("total_tokens"),
+                "total_ms": timings.get("total_ms"),
+            },
+        )
 
         return PipelineOutput(
             status=status,
