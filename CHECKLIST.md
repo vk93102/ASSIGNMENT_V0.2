@@ -40,17 +40,18 @@ Describe how you approached this assignment and what key problems you identified
 
 - [x] **Logging**
   - Description:
-    - Structured logging support via `src/observability.py` (text by default; JSON when `LOG_FORMAT=json`).
-    - Request correlation via `request_id` and event logs (`pipeline_start`, `sql_validation_failed`, `pipeline_end`, `turn_saved_to_conversation`).
+    - Structured logging via `get_logger()` + `JsonFormatter` in `src/support.py` (text by default; JSON when `LOG_FORMAT=json`).
+    - Pipeline lifecycle events are logged (`pipeline_start`, `sql_validation_failed`, `pipeline_end`, `turn_saved_to_conversation`).
+    - Request correlation is propagated via `request_id` in log `extra` fields (best viewed with `LOG_FORMAT=json`).
 
-- [ ] **Metrics**
+- [x] **Metrics**
   - Description:
-    - Not exported to a metrics backend (Prometheus/StatsD) yet.
-    - Pipeline does compute per-request metrics (`timings`, `total_llm_stats`) and logs key fields on completion, but there’s no aggregation/export layer.
+    - Per-request metrics are computed and returned in `PipelineOutput.timings` and `PipelineOutput.total_llm_stats` (LLM calls + token usage).
+    - Not exported/aggregated to a metrics backend (Prometheus/StatsD) yet.
 
 - [ ] **Tracing**
   - Description:
-    - No distributed tracing (OpenTelemetry spans) implemented.
+    - No distributed tracing (OpenTelemetry spans) implemented; only request-level correlation via `request_id`.
 
 ---
 
@@ -102,15 +103,15 @@ Describe how you approached this assignment and what key problems you identified
 ## LLM Efficiency
 
 - [x] **Token usage optimization**
-  - Model: openai/gpt-4o-mini (fixed from non-existent gpt-5-nano)
-  - Average: ~100-200 tokens per request
-  - Strategies: scalar fast-path, column selection, result sampling
-  - Schema filter reduces prompt size; answer fast-paths avoid expensive LLM calls
+  - Model: `openai/gpt-4o-mini` (default in `src/llm_client.py`, configurable via `OPENROUTER_MODEL`).
+  - Strategies: schema column filtering (`SCHEMA_FILTER_MODE`), scalar/no-rows fast paths (skip answer LLM), and caching.
+  - Observed tokens vary by prompt and whether answer synthesis runs; on the public prompt set with LLM available it was typically a few hundred to ~1k total tokens/request.
+  - In fallback-only mode (e.g., OpenRouter credits exhausted) token usage is 0.
 
 - [x] **Efficient LLM requests**
   - SQL generation uses strict JSON output (simpler parsing, lower max tokens)
   - Single retry after validation failure (deterministic, not speculative)
-  - LLM response caching for SQL generation (50% hit rate)
+  - LLM response caching for SQL generation (TTL/LRU in `src/llm_client.py`)
   - Typical 1-2 LLM calls per request (SQL generation + optional answer)
   - Improved response parsing handles all OpenRouter response formats
 
@@ -141,14 +142,14 @@ Describe how you approached this assignment and what key problems you identified
 ## Multi-Turn Conversation Support
 
 - [x] **Intent detection for follow-ups**
-  - Description: Heuristic intent classifier in `src/intent_detector.py` labels turns as `new_query` vs `clarification` vs `reference_previous` using keywords/pronouns + similarity to prior question.
+  - Description: Heuristic intent classifier `IntentDetector` in `src/support.py` labels turns as `new_query` vs `clarification` vs `reference_previous` using keywords/pronouns + similarity to prior question.
 
 - [x] **Context-aware SQL generation**
   - Description: Recent conversation history is injected into the SQL-generation context (`conversation_history` in the schema context) so the model can resolve follow-ups.
     - Limitation: follow-up handling currently relies on “history in prompt” rather than explicit SQL-rewrite logic.
 
 - [x] **Context persistence**
-  - Description: `src/context_manager.py` stores an in-memory `ConversationContext` keyed by `conversation_id`, retains recent turns, and bounds history length.
+  - Description: In-memory `ContextManager` in `src/support.py` stores a `ConversationContext` keyed by `conversation_id`, retains recent turns, and bounds history length.
 
 - [x] **Ambiguity resolution**
   - Description: Intent heuristics detect comparative/pronoun follow-ups (e.g., “what about …”), and the stored conversation context provides the prior question/answer as grounding for the model.
@@ -197,27 +198,32 @@ Include your before/after benchmark results here.
 Repro notes (files / commands):
 - Prompt set: `tests/public_prompts.json`
 - Latency-only benchmark: `scripts/benchmark.py` (example: `python3 scripts/benchmark.py --runs 1`)
-- Latency + LLM efficiency benchmark: `scripts/benchmark_efficiency.py` (example: `python3 scripts/benchmark_efficiency.py --runs 1 --mode solution`)
-- Measured baseline mode (no LLM, pre-improvement fallback rules): `scripts/benchmark_efficiency.py` (example: `python3 scripts/benchmark_efficiency.py --runs 1 --mode baseline`)
+
+Notes:
+- `scripts/benchmark.py` requires `OPENROUTER_API_KEY` to be set for LLM mode.
+- When OpenRouter credits are unavailable, the pipeline falls back to deterministic SQL patterns; this changes latency and token/call counts.
 
 **Baseline (if you measured):**
-- Average latency: `215.49 ms` (1 run × 12 public prompts, `--mode baseline`)
-- p50 latency: `171.05 ms`
-- p95 latency: `236.53 ms`
-- Success rate: `66.67 %`
+- Not measured separately from the current implementation.
 
-**Your solution:**
-- Average latency: `13390.61 ms` (1 run × 12 public prompts, `--mode solution`)
-- p50 latency: `14262.65 ms`
-- p95 latency: `17480.41 ms`
+**Your solution (LLM available):**
+- Average latency: `2622.30 ms` (1 run × 12 public prompts)
+- p50 latency: `2793.26 ms`
+- p95 latency: `3867.20 ms`
+- Success rate: `100.0 %`
+
+**Your solution (fallback-only / no LLM credits):**
+- Average latency: `346.17 ms` (1 run × 12 public prompts)
+- p50 latency: `245.88 ms`
+- p95 latency: `327.77 ms`
 - Success rate: `100.0 %`
 
 **LLM efficiency:**
-- Average tokens per request: `890.0`
-- Average LLM calls per request: `1.833`
+- With LLM available: typically 1-2 calls/request (SQL + optional answer) and total tokens in the hundreds to ~1k range on public prompts.
+- Fallback-only mode: `0` calls/request, `0` tokens/request.
 
 ---
 
 **Completed by:** RAHUL JHA
-**Date:** 2026-03-28
+**Date:** 2026-03-29
 **Time spent:** 4-5 hours 

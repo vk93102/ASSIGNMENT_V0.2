@@ -65,10 +65,7 @@ def make_pipeline_output(
 
 
 class TestIntentDetection:
-    """Test intent detection for follow-up questions."""
-    
     def test_first_turn_is_new_query(self):
-        """First question in conversation should be detected as new_query."""
         detector = IntentDetector()
         context = ConversationContext(conversation_id="conv1")
         
@@ -78,11 +75,9 @@ class TestIntentDetection:
         assert intent.confidence == 1.0
     
     def test_completely_different_question_is_new_query(self):
-        """Asking about different topic should be new_query."""
         detector = IntentDetector()
         context = ConversationContext(conversation_id="conv1")
         
-        # Add first turn
         turn1 = ConversationTurn(
             turn_id=0,
             user_question="What is the average addiction level?",
@@ -93,13 +88,11 @@ class TestIntentDetection:
         )
         context.turns.append(turn1)
         
-        # Ask different question
         intent = detector.detect("How many total players are there?", context)
         
         assert intent.intent_type == "new_query"
     
     def test_group_by_refinement_is_clarification(self):
-        """Asking to group/filter previous result is clarification."""
         detector = IntentDetector()
         context = ConversationContext(conversation_id="conv1")
         
@@ -113,11 +106,7 @@ class TestIntentDetection:
         )
         context.turns.append(turn1)
         
-        # Ask for breakdown with "break down" keyword (strong indicator)
         intent = detector.detect("Break down by gender please", context)
-        
-        # Should detect as clarification/reference or at worst new_query (heuristic may vary)
-        # The important thing is the system handles it correctly in practice
         assert intent.intent_type in ["clarification", "reference_previous", "new_query"]
     
     def test_comparative_question_references_previous(self):
@@ -135,17 +124,11 @@ class TestIntentDetection:
         )
         context.turns.append(turn1)
         
-        # Ask comparative with reference keywords
         intent = detector.detect("What about data for males?", context)
-        
-        # Should detect as reference_previous due to "What about" keyword
-        # Confidence might not be super high if LLM was too conservative
         assert intent.intent_type in ["reference_previous", "clarification", "new_query"]
-        # At minimum should have some reasoning about the reference
         assert intent.reasoning != ""
     
     def test_confidence_scores(self):
-        """Intent detection should include confidence scores."""
         detector = IntentDetector()
         context = ConversationContext(conversation_id="conv1")
         
@@ -156,10 +139,7 @@ class TestIntentDetection:
 
 
 class TestContextManagement:
-    """Test conversation context management."""
-    
     def test_create_conversation(self):
-        """Can create new conversation."""
         manager = ContextManager()
         context = manager.create_conversation("conv1", schema_fingerprint="abc123")
         
@@ -168,7 +148,6 @@ class TestContextManagement:
         assert len(context.turns) == 0
     
     def test_get_conversation(self):
-        """Can retrieve conversation by ID."""
         manager = ContextManager()
         manager.create_conversation("conv1")
         
@@ -178,7 +157,6 @@ class TestContextManagement:
         assert retrieved.conversation_id == "conv1"
     
     def test_add_turn_to_conversation(self):
-        """Can add turns to conversation."""
         manager = ContextManager()
         context = manager.create_conversation("conv1")
         
@@ -198,11 +176,9 @@ class TestContextManagement:
         assert len(context.turns) == 1
     
     def test_context_bounded_by_max_turns(self):
-        """Context should be bounded to prevent memory explosion."""
         manager = ContextManager(max_turns=5)
         context = manager.create_conversation("conv1")
         
-        # Add more turns than limit
         for i in range(10):
             output = make_pipeline_output(
                 status="success",
@@ -213,15 +189,12 @@ class TestContextManagement:
             )
             manager.add_turn("conv1", output)
         
-        # Should keep only recent turns
-        assert len(context.turns) <= 7  # max_turns + 2
+        assert len(context.turns) <= 7  
     
     def test_get_context_for_prompt(self):
-        """Can retrieve formatted context for LLM prompt."""
         manager = ContextManager()
         context = manager.create_conversation("conv1")
         
-        # Add some turns
         for i in range(3):
             output = make_pipeline_output(
                 status="success",
@@ -237,7 +210,6 @@ class TestContextManagement:
         assert "Question 0" in prompt_context or "Previous conversation" in prompt_context
     
     def test_clear_conversation(self):
-        """Can delete conversation."""
         manager = ContextManager()
         manager.create_conversation("conv1")
         assert manager.get_conversation("conv1") is not None
@@ -295,10 +267,7 @@ class TestMultiTurnQueryBuilder:
 
 
 class TestMultiTurnConversationFlow:
-    """Integration tests for complete multi-turn flows."""
-    
     def test_two_turn_conversation(self):
-        """Test simple two-turn conversation flow."""
         manager = ContextManager()
         detector = IntentDetector()
         
@@ -347,7 +316,6 @@ class TestMultiTurnConversationFlow:
         
         context = manager.create_conversation("conv1")
         
-        # Turn 1: New query
         turn1_output = make_pipeline_output(
             status="success",
             question="Average addiction level for females?",
@@ -358,11 +326,9 @@ class TestMultiTurnConversationFlow:
         )
         manager.add_turn("conv1", turn1_output, intent_type="new_query")
         
-        # Turn 2: Reference previous (comparison)
         turn2_question = "What about males?"
         intent = detector.detect(turn2_question, context)
         
-        # Should detect some kind of follow-up
         assert intent.intent_type in ["reference_previous", "clarification", "new_query"]
         
         turn2_output = make_pipeline_output(

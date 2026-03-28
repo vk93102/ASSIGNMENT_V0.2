@@ -29,7 +29,7 @@ class SemanticValidator:
         r"\/\*",           # block comments start
         r"\[\w+\]",        # SQL Server brackets
         r"dbo\.",          # SQL Server schema
-        r"[a-z_]+\.",      # schema-qualified (other_db.table)
+        r"\b(?:from|join)\s+[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\b",  # cross-db/table qualification
         r"%00",            # null byte injection
         r"replace\s+into",  # REPLACE INTO statement
     ]
@@ -76,6 +76,7 @@ class SemanticValidator:
             return []
         
         select_part = match.group(1)
+        select_part = re.sub(r"'(?:''|[^'])*'", "''", select_part)
         select_part = re.sub(r'\s+AS\s+\w+', '', select_part, flags=re.IGNORECASE)
         identifiers = re.findall(r'([a-z_][a-z0-9_]*)', select_part, re.IGNORECASE)
         functions = {"avg", "sum", "count", "min", "max", "distinct", "as", "cast", "case", 

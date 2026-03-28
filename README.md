@@ -30,18 +30,21 @@ The pipeline is functional end-to-end and includes:
 - Single SQLite table with gaming and mental health survey data
 - Public tests and benchmark script
 - OpenRouter integration via [OpenRouter Python SDK](https://pypi.org/project/openrouter/)
-- Configurable model (default: `openai/gpt-5-nano`, override via `OPENROUTER_MODEL`)
+- Configurable model (default: `openai/gpt-4o-mini`, override via `OPENROUTER_MODEL`)
 
 ## Hard Requirements
 1. Do not modify existing public tests in `tests/test_public.py`.
 2. Public tests must pass.
 3. Keep the project runnable locally with standard Python.
-4. Output contract: `AnalyticsPipeline.run()` must return a `PipelineOutput` instance, with each stage producing outputs that conform to the type schemas in `src/types.py`. This enables automated evaluation; submissions that deviate from it cannot be graded correctly.
+4. Output contract: `AnalyticsPipeline.run()` must return a `PipelineOutput` instance, with each stage producing outputs that conform to the dataclass schemas in `src/support.py`. This enables automated evaluation; submissions that deviate from it cannot be graded correctly.
 5. Token counting must be implemented. The baseline includes a skeleton for tracking LLM usage statistics in `src/llm_client.py`, but you must implement the actual token counting. This is required for the efficiency evaluation to work.
 
 Notes:
 - Public tests are unchanged and gated by `OPENROUTER_API_KEY`.
 - Token/call accounting is surfaced per request in `PipelineOutput.total_llm_stats`.
+
+Implementation note:
+- The `PipelineOutput` and stage output dataclasses are defined in `src/support.py`.
 
 ## Production Readiness Requirements
 
@@ -169,8 +172,8 @@ The current pipeline handles single, isolated questions. In real-world scenarios
 
 In this repo, multi-turn support is implemented via:
 - `conversation_id` passed to `AnalyticsPipeline.run(...)`
-- an in-memory `ConversationContext` store (`src/context_manager.py`)
-- follow-up intent heuristics (`src/intent_detector.py`)
+- an in-memory `ConversationContext` store (`ContextManager` in `src/support.py`)
+- follow-up intent heuristics (`IntentDetector` in `src/support.py`)
 
 ## General Notes
 - The baseline intentionally leaves room for substantial optimization.

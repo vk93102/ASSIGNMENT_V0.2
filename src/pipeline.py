@@ -81,30 +81,6 @@ class SQLiteExecutor:
                         elapsed_ms = (time.perf_counter() - t0) * 1000
                         return 1 if elapsed_ms > float(self.timeout_ms) else 0
 
-                        def _normalize_sqlite_sql(s: str | None) -> str | None:
-                            if s is None:
-                                return None
-                            raw = s.strip()
-                            if not raw:
-                                return s
-
-                            m = re.match(r"(?is)^\s*select\s+top\s+(\d+)\s+", raw)
-                            if m:
-                                n = m.group(1)
-                                rewritten = re.sub(r"(?is)^\s*select\s+top\s+\d+\s+", "SELECT ", raw)
-                                if re.search(r"(?is)\blimit\b", rewritten) is None:
-                                    semi = ";" if rewritten.rstrip().endswith(";") else ""
-                                    rewritten = rewritten.rstrip().rstrip(";").rstrip()
-                                    rewritten = f"{rewritten} LIMIT {n}{semi}"
-                                raw = rewritten
-
-                            raw = re.sub(r"(?i)\bilike\b", "LIKE", raw)
-                            return raw
-
-                        if sql is not None:
-                            sql = _normalize_sqlite_sql(sql)
-                            sql_gen_output.sql = sql
-
                     conn.set_progress_handler(_handler, 10_000)
 
                 conn.row_factory = sqlite3.Row
@@ -481,7 +457,6 @@ class AnalyticsPipeline:
                         allowed_columns=set(schema.columns),
                     )
                 else:
-                    # Fallback returned None (invalid or out-of-domain)
                     sql_gen_output.sql = None
                     sql = None
 
@@ -491,7 +466,6 @@ class AnalyticsPipeline:
             sql = validation_output.validated_sql
 
         # Stage 3b: Semantic Validation (check if SQL meaningfully answers the question)
-        # This must happen BEFORE execution so we can null out bad SQL
         semantic_valid = True
         semantic_error = None
         if sql is not None and validation_output.is_valid:
