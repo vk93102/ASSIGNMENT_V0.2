@@ -16,7 +16,6 @@ from scripts.gaming_csv_to_db import DEFAULT_CSV_PATH, DEFAULT_DB_PATH, DEFAULT_
 
 
 def _ensure_gaming_db() -> Path:
-    """Ensure gaming mental health DB exists; create from CSV if missing."""
     if not DEFAULT_DB_PATH.exists():
         csv_to_sqlite(DEFAULT_CSV_PATH, DEFAULT_DB_PATH, DEFAULT_TABLE_NAME, if_exists="replace")
     return DEFAULT_DB_PATH

@@ -5,8 +5,18 @@ import sqlite3
 import time
 from pathlib import Path
 
-from src.types import SQLValidationOutput
+from src.support import SQLValidationOutput
 
+
+# Security strategy: Whitelist-based validation (only SELECT/WITH)
+# instead of blacklist. This is safer because:
+# 1) Prevents evasion via case variation, comments, concatenation
+# 2) Explicit about LLM capabilities (no ambiguity)
+# 3) Fail-safe: unknown patterns rejected by default
+
+
+
+_ALLOWED = {"select", "with"}
 
 _DISALLOWED = {
     "delete",
@@ -26,9 +36,7 @@ _DISALLOWED = {
 
 
 def _strip_sql_comments(sql: str) -> str:
-    # Remove -- line comments
     sql = re.sub(r"--.*?$", "", sql, flags=re.MULTILINE)
-    # Remove /* */ block comments
     sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
     return sql
 
@@ -36,23 +44,29 @@ def _strip_sql_comments(sql: str) -> str:
 def _normalize_sql(sql: str) -> str:
     sql = sql.strip()
     sql = _strip_sql_comments(sql).strip()
-    # Collapse whitespace for easier pattern checks
     sql = re.sub(r"\s+", " ", sql).strip()
+    if sql.endswith(";"):
+        sql = sql[:-1].rstrip()
     return sql
 
 
-def _has_multiple_statements(sql: str) -> bool:
-    """Return True if SQL contains a statement separator outside of quotes.
 
-    Allows a single trailing semicolon (e.g. "SELECT 1;").
-    """
+
+
+""" Detect stacked SQL queries (e.g., 'SELECT ...; DELETE ...').
+    Critical for preventing multi-statement injection attacks. LLMs can be
+    tricked with hidden prompts like 'SELECT ...; DELETE * FROM'.
+    We parse manually (not regex) to handle quotes/comments correctly
+    and avoid false positives on strings containing semicolons.
+"""
+
+def _has_multiple_statements(sql: str) -> bool:
     in_single = False
     in_double = False
     in_backtick = False
     idxs: list[int] = []
     for i, ch in enumerate(sql):
         if ch == "'" and not in_double and not in_backtick:
-            # Toggle single-quote unless it's an escaped quote ('' inside string)
             if in_single and i + 1 < len(sql) and sql[i + 1] == "'":
                 continue
             in_single = not in_single
@@ -65,31 +79,25 @@ def _has_multiple_statements(sql: str) -> bool:
 
     if not idxs:
         return False
-    # If there's more than one separator, treat as multiple statements.
     if len(idxs) > 1:
         return True
-    # Single separator: allow only if it is trailing whitespace.
     tail = sql[idxs[0] + 1 :].strip()
     return tail != ""
 
 
 def _extract_cte_names(sql: str) -> set[str]:
-    # Very small CTE name extractor: WITH name AS ( ... ), name2 AS (...)
     lower = sql.lower()
     if not lower.startswith("with "):
         return set()
 
     names: set[str] = set()
-    # Only scan the prefix to avoid catastrophic backtracking
     prefix = sql[: min(len(sql), 5000)]
     for m in re.finditer(r"\bwith\s+|,\s*", prefix, flags=re.IGNORECASE):
-        # Start scanning at match end for `name AS (`
         start = m.end()
         mm = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s+as\s*\(", prefix[start:], flags=re.IGNORECASE)
         if mm:
             names.add(mm.group(1))
 
-    # Also handle the first CTE when prefix starts with WITH directly
     m0 = re.match(r"\s*with\s+([A-Za-z_][A-Za-z0-9_]*)\s+as\s*\(", prefix, flags=re.IGNORECASE)
     if m0:
         names.add(m0.group(1))
@@ -98,7 +106,6 @@ def _extract_cte_names(sql: str) -> set[str]:
 
 
 def _find_referenced_tables(sql: str) -> set[str]:
-    # Extract identifiers after FROM / JOIN. Ignores subqueries.
     refs: set[str] = set()
     for kw in ("from", "join"):
         for m in re.finditer(rf"\b{kw}\b\s+([^\s,()]+)", sql, flags=re.IGNORECASE):
@@ -106,7 +113,6 @@ def _find_referenced_tables(sql: str) -> set[str]:
             if token.startswith("("):
                 continue
             token = token.strip('"`[]')
-            # Remove trailing alias marker like table AS t
             token = token.split(".")[0]
             refs.add(token.lower())
     return refs
@@ -116,10 +122,106 @@ def _ensure_reasonable_limit(sql: str, limit: int = 100) -> str:
     lower = sql.lower()
     if " limit " in lower or lower.endswith(" limit"):
         return sql
-    # If query is aggregating or grouping, don't inject limit (could change results)
     if any(x in lower for x in (" group by ", " count(", " avg(", " sum(", " min(", " max(") ):
         return sql
     return f"{sql} LIMIT {limit}"
+
+
+def _extract_column_identifiers_sqlparse(sql: str) -> set[str]:
+    try:
+        import sqlparse 
+        from sqlparse.sql import Function, Identifier, IdentifierList, Parenthesis, TokenList 
+        from sqlparse.tokens import Wildcard  
+    except Exception:
+        return set()
+
+    try:
+        statements = sqlparse.parse(sql)
+    except Exception:
+        return set()
+    if not statements:
+        return set()
+
+    names: set[str] = set()
+    aliases: set[str] = set()
+
+    function_names = {
+        "avg",
+        "sum",
+        "count",
+        "min",
+        "max",
+        "coalesce",
+        "ifnull",
+        "nullif",
+        "round",
+        "cast",
+        "substr",
+        "lower",
+        "upper",
+        "abs",
+        "length",
+        "date",
+        "datetime",
+        "strftime",
+    }
+
+    def _identifier_contains_function(ident: "Identifier") -> bool:
+        for t in ident.tokens:
+            if isinstance(t, Function):
+                return True
+        return False
+
+    def collect_aliases(token_list: "TokenList") -> None:
+        # PASS 1: Collect all aliases (e.g., 'AVG(...) AS avg_value' -> 'avg_value')
+        # This must run before validation because queries like:
+        #   SELECT AVG(addiction_level) AS avg_addiction FROM table
+        # would fail if we validated columns without knowing about 'avg_addiction' alias
+        for tok in token_list.tokens:
+            if tok is None:
+                continue
+            if isinstance(tok, IdentifierList):
+                for ident in tok.get_identifiers():
+                    if isinstance(ident, Identifier):
+                        alias = ident.get_alias()
+                        if alias:
+                            aliases.add(alias.lower())
+            elif isinstance(tok, Identifier):
+                alias = tok.get_alias()
+                if alias:
+                    aliases.add(alias.lower())
+            elif isinstance(tok, TokenList):
+                collect_aliases(tok)
+
+    def walk(token_list: "TokenList") -> None:
+        for tok in token_list.tokens:
+            if tok is None:
+                continue
+            if isinstance(tok, IdentifierList):
+                for ident in tok.get_identifiers():
+                    if isinstance(ident, Identifier):
+                        walk(ident)
+            elif isinstance(tok, Identifier):
+                if _identifier_contains_function(tok):
+                    walk(tok)
+                    continue
+                real = tok.get_real_name()
+                if real:
+                    r = real.lower()
+                    if r not in aliases and r not in function_names:
+                        names.add(r)
+            elif isinstance(tok, Function):
+                for child in tok.tokens:
+                    if isinstance(child, Parenthesis):
+                        walk(child)
+            elif tok.ttype is Wildcard:
+                pass
+            elif isinstance(tok, TokenList):
+                walk(tok)
+
+    collect_aliases(statements[0])
+    walk(statements[0])
+    return names
 
 
 class SQLValidator:
@@ -153,7 +255,6 @@ class SQLValidator:
                 timing_ms=(time.perf_counter() - start) * 1000,
             )
 
-        # Reject multiple statements.
         if _has_multiple_statements(normalized):
             return SQLValidationOutput(
                 is_valid=False,
@@ -162,7 +263,6 @@ class SQLValidator:
                 timing_ms=(time.perf_counter() - start) * 1000,
             )
 
-        # Reject disallowed keywords.
         for kw in _DISALLOWED:
             if re.search(rf"\b{re.escape(kw)}\b", lower):
                 return SQLValidationOutput(
@@ -172,11 +272,9 @@ class SQLValidator:
                     timing_ms=(time.perf_counter() - start) * 1000,
                 )
 
-        # Restrict tables.
         cte_names = _extract_cte_names(normalized)
         referenced = _find_referenced_tables(normalized)
         allowed_tables = {table_name.lower(), *cte_names}
-        # sqlite_master is a common escape hatch
         if "sqlite_master" in referenced:
             return SQLValidationOutput(
                 is_valid=False,
@@ -184,6 +282,7 @@ class SQLValidator:
                 error="Access to sqlite_master is not allowed.",
                 timing_ms=(time.perf_counter() - start) * 1000,
             )
+       
         unexpected = {t for t in referenced if t not in allowed_tables}
         if unexpected:
             return SQLValidationOutput(
@@ -193,11 +292,11 @@ class SQLValidator:
                 timing_ms=(time.perf_counter() - start) * 1000,
             )
 
-        # Best-effort column allowlist check: only enforce if we can find table-qualified cols.
         if allowed_columns:
+            allowed_lower = {c.lower() for c in allowed_columns}
             for m in re.finditer(rf"\b{re.escape(table_name)}\.([A-Za-z_][A-Za-z0-9_]*)\b", normalized, flags=re.IGNORECASE):
                 col = m.group(1)
-                if col not in allowed_columns:
+                if col.lower() not in allowed_lower:
                     return SQLValidationOutput(
                         is_valid=False,
                         validated_sql=None,
@@ -205,9 +304,41 @@ class SQLValidator:
                         timing_ms=(time.perf_counter() - start) * 1000,
                     )
 
+            extracted = _extract_column_identifiers_sqlparse(normalized)
+            if extracted:
+                ignore = {table_name.lower(), *cte_names}
+                for name in extracted:
+                    if name in ignore:
+                        continue
+                    if name in {
+                        "select",
+                        "from",
+                        "where",
+                        "group",
+                        "order",
+                        "limit",
+                        "join",
+                        "on",
+                        "as",
+                        "and",
+                        "or",
+                        "when",
+                        "then",
+                        "else",
+                        "end",
+                        "with",
+                    }:
+                        continue
+                    if name not in allowed_lower:
+                        return SQLValidationOutput(
+                            is_valid=False,
+                            validated_sql=None,
+                            error=f"Unknown column referenced: {name}",
+                            timing_ms=(time.perf_counter() - start) * 1000,
+                        )
+
         validated_sql = _ensure_reasonable_limit(normalized)
 
-        # Validate against SQLite parser and schema.
         try:
             with sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True) as conn:
                 try:
@@ -219,7 +350,7 @@ class SQLValidator:
             return SQLValidationOutput(
                 is_valid=False,
                 validated_sql=None,
-                error=f"SQL failed to parse/plan: {exc}",
+                error=f"SQL failed to parse/plan: {exc}. Suggestion: verify column names and table name match the schema.",
                 timing_ms=(time.perf_counter() - start) * 1000,
             )
 

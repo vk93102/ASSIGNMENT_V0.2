@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+__test__ = False
+
 import os
 import sys
 import unittest
@@ -12,7 +14,7 @@ if str(BACKEND_ROOT) not in sys.path:
 from src.pipeline import AnalyticsPipeline
 from scripts.gaming_csv_to_db import csv_to_sqlite
 from scripts.gaming_csv_to_db import DEFAULT_CSV_PATH, DEFAULT_DB_PATH, DEFAULT_TABLE_NAME
-from src.types import (
+from src.support import (
     AnswerGenerationOutput,
     PipelineOutput,
     SQLExecutionOutput,

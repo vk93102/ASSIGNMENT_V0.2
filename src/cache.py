@@ -16,9 +16,21 @@ class CacheEntry(Generic[V]):
 
 
 class LRUCache(Generic[K, V]):
-    """Tiny LRU cache with optional TTL.
-
-    Designed for in-process caching of deterministic LLM calls.
+    """LRU cache with optional TTL (time-to-live) expiration.
+    
+    Design rationale:
+    - LRU: Keeps hot items (frequently accessed) in cache
+    - TTL: Allows cache invalidation without manual clearing
+    - OrderedDict: Maintains insertion order for LRU eviction
+    
+    Used for three purposes in pipeline:
+    1. pipeline_cache (300s TTL): Deduplicates full pipeline outputs
+    2. fallback_cache (600s TTL): Caches fallback SQL results
+    3. llm_cache (optional): Caches individual LLM generations
+    
+    Trade-off: TTL doesn't invalidate on schema changes. If database
+    schema changes mid-session, cache can return stale results.
+    Mitigated by including schema fingerprint in cache keys.
     """
 
     def __init__(self, *, max_size: int = 128, ttl_seconds: float | None = None) -> None:

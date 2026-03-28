@@ -1,21 +1,3 @@
-"""
-Gaming Mental Health CSV -> SQLite Converter
-
-Usage:
-    python scripts/gaming_csv_to_db.py [--if-exists replace|append|fail]
-
-What it does:
-- Converts gaming_mental_health_10M_40features.csv to SQLite
-- Creates table 'gaming_mental_health' in data/gaming_mental_health.sqlite
-- Streams CSV in chunks to handle large records efficiently
-- Infers column types and creates appropriate SQLite schema
-
-Default paths:
-- CSV: data/gaming_mental_health_10M_40features.csv
-- DB: data/gaming_mental_health.sqlite (project root)
-- Table: gaming_mental_health
-"""
-
 import argparse
 import sqlite3
 import sys
@@ -24,7 +6,6 @@ import os
 
 import pandas as pd
 
-# Default paths (relative to script location)
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 DEFAULT_CSV_PATH = PROJECT_ROOT / "data" / "gaming_mental_health_10M_40features.csv"
@@ -50,12 +31,10 @@ def create_table_from_df(
 ):
     cursor = conn.cursor()
 
-    # 1. Handle "replace" logic explicitly
     if if_exists == "replace":
         cursor.execute(f'DROP TABLE IF EXISTS "{table_name}"')
         conn.commit()
 
-    # 2. Check if table exists
     cursor.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
         (table_name,),
@@ -70,7 +49,6 @@ def create_table_from_df(
         elif if_exists == "append":
             return
 
-    # 3. Build Column Definitions
     cols = []
     for col in df.columns:
         coltype = map_pd_dtype_to_sql(df[col].dtype)
@@ -89,7 +67,6 @@ def insert_chunk(conn: sqlite3.Connection, table_name: str, df: pd.DataFrame):
     placeholders = ",".join(["?"] * len(df.columns))
     sql = f'INSERT INTO "{table_name}" ({",".join(cols)}) VALUES ({placeholders})'
 
-    # Vectorized NA -> None conversion is much faster than per-cell checks.
     df2 = df.where(pd.notna(df), None)
     cursor.executemany(sql, df2.itertuples(index=False, name=None))
 
@@ -104,18 +81,16 @@ def csv_to_sqlite(
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
 
-    # Create data directory if it doesn't exist
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"Connecting to database at: {db_path}")
     conn = sqlite3.connect(db_path)
 
-    # Speed-focused pragmas for bulk load (safe enough for local rebuilds).
     try:
         conn.execute("PRAGMA journal_mode = OFF")
         conn.execute("PRAGMA synchronous = OFF")
         conn.execute("PRAGMA temp_store = MEMORY")
-        conn.execute("PRAGMA cache_size = -200000")  # ~200MB
+        conn.execute("PRAGMA cache_size = -200000") 
     except Exception:
         pass
 
@@ -155,15 +130,11 @@ def csv_to_sqlite(
 
 
 def verify_database(db_path: Path, table_name: str):
-    """Verify the database was created correctly and show stats."""
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-
-    # Get row count
     cursor.execute(f'SELECT COUNT(*) FROM "{table_name}"')
     total_rows = cursor.fetchone()[0]
 
-    # Get column info
     cursor.execute(f'PRAGMA table_info("{table_name}")')
     columns = cursor.fetchall()
 
@@ -175,7 +146,6 @@ def verify_database(db_path: Path, table_name: str):
         cid, name, dtype, notnull, dflt_value, pk = col
         print(f"  - {name} ({dtype})")
 
-    # Gender distribution
     try:
         cursor.execute(f'''
             SELECT gender, COUNT(*) as count
@@ -191,7 +161,6 @@ def verify_database(db_path: Path, table_name: str):
     except sqlite3.OperationalError:
         pass
 
-    # Addiction level distribution (bucketed: low 0-2, medium 2-5, high 5+)
     try:
         cursor.execute(f'''
             SELECT

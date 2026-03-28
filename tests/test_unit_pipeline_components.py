@@ -1,4 +1,4 @@
-"""Deprecated: unit tests consolidated into tests/test_unit.py."""
+__test__ = False
 
 import unittest
 
